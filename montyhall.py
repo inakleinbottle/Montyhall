@@ -19,6 +19,7 @@ import random
 import functools
 import inspect
 import time
+from collections import namedtuple
 from concurrent.futures import ProcessPoolExecutor
 from itertools import accumulate
 
@@ -28,7 +29,14 @@ __all__ = [
     "CLASSICAL_MONTY_HALL", 
     "always_swap", 
     "never_swap",
+    "MontyHallResult",
 ]
+
+
+MontyHallResult = namedtuple("MontyHallResult", ("success", "correct", "choices"))
+
+DOOR_COUNT = 0
+
 
 class Door:
     """
@@ -38,19 +46,29 @@ class Door:
     the classical case of equal probabilities.
     """
 
-    def __init__(self, probability=None):
+    def __init__(self, probability=None, label=None):
         if probability is not None:
             assert 0 < probability < 1, "Probability must be between 0 and 1"
+        if label is None:
+            global DOOR_COUNT
+            label = DOOR_COUNT
+            DOOR_COUNT += 1
+        self.label = label
         self.probability = probability
 
     def __repr__(self):
-        return f"Door(probabilty={self.probability})"
+        return f"Door(label={self.label})"
 
     def __str__(self):
-        return f"Door with probability {self.probability}"
+        return f"Door {self.label} with probability {self.probability}"
+    
+    def __eq__(self, other):
+        if isinstance(other, Door):
+            return self.label == other.label
+        return NotImplemented
 
 
-def experiment(doors, strategy, correct):
+def experiment(doors, strategy, choice_func, correct):
     """
     Function that runs the actual experiment.
 
@@ -62,13 +80,16 @@ def experiment(doors, strategy, correct):
     Once only two doors remain, the experiment returns True if the most
     recent selection was the correct door, and False otherwise.
     """
+    door_indices = list(range(len(doors)))
     selections = [random.choice(doors)]
-    while len(doors) > 2:
-        elim = random.choice([d for d in doors if not d == correct
-                              if not d == selections[-1]])
-        doors.remove(elim)
-        selections.append(strategy(doors, selections))
-    return selections[-1] == correct
+    while len(door_indices) > 2:
+        elim = choice_func([i for i in door_indices 
+                            if not doors[i] in (correct, selections[-1])])
+        door_indices.remove(elim)
+        selections.append(
+            strategy([doors[i] for i in door_indices], selections)
+        )
+    return MontyHallResult(selections[-1] == correct, correct, selections)
         
 
 class MontyHallExperiment:
@@ -113,13 +134,15 @@ class MontyHallExperiment:
 
         This is a generator function.
         """
-        cum_weights = list(accumulate(d.probability for d in self.doors))
+        doors = self.doors
+        cum_weights = list(accumulate(d.probability for d in doors))
         for _ in range(number):
             rand_no = random.random()
-            yield min(i for i, w in enumerate(cum_weights)
-                      if rand_no < w)
+            index = min(i for i, w in enumerate(cum_weights)
+                        if rand_no < w)
+            yield doors[index]
 
-    def run_simulations(self, strategy, number=1000, max_workers=None):
+    def run_simulations(self, strategy, number=1000, max_workers=None, choice_func=random.choice):
         """
         Run the number of simulations.
 
@@ -133,11 +156,12 @@ class MontyHallExperiment:
         """
         start = time.time()
         assert inspect.isfunction(strategy), "strategy must be a function"
-        doors = list(range(len(self.doors)))
-        func = functools.partial(self.experiment, doors, strategy) 
+        func = functools.partial(
+            self.experiment, self.doors, strategy, choice_func
+        ) 
         with ProcessPoolExecutor(max_workers=max_workers) as pool:
-            results = pool.map(func, self.get_correct_doors(number))
-            successes = sum(1 for r in results if r)
+            results = pool.map(func, self.get_correct_doors(number), chunksize=1000)
+            successes = sum(1 for r in results if r.success)
         print(f"Ran {number} simulations in {time.time() - start} seconds")
         return successes / number
 
@@ -148,7 +172,9 @@ def always_swap(doors, past_selections):
 
     This is the optimum strategy for the classical Monty Hall problem.
     """
-    return min(i for i in doors if not i == past_selections[-1])
+    temp = [d for d in doors if not d == past_selections[-1]]
+    return temp[0]
+
 
 def never_swap(doors, past_selections):
     """
